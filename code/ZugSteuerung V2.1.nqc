@@ -1,0 +1,165 @@
+/* --------------------------------------------------------
+   VERSIONSINFOS
+   -------------------------------------------------------- */
+   
+   Version: 2.1
+   Autor:   Frederik Held
+   
+   Hardware:
+   - Einfahrt in die Stationen wird per Reed-Kontakt gemeldet. Diese werden wie Touch-Sensoren programmiert.
+     Nachteil: Im Gegensatz zu den Lichtsensoren kann nicht erkannt werden, ob sich ein Zug zur Zeit in der
+               Station befindet.
+     Vorteil: Funktioniert absolut zuverlässig unabhängig vom Umgebungslicht.
+   - Bis jetzt gibt es keinen Trigger-Sensor. Geplant ist, dies mit einem Pyro-Sensor (IR-Bewegungsmelder)
+     umzusetzen, da dieser auch unabhängig vom Umgebungslicht ist und trotzdem durch die Scheibe hindurch
+     auf Personen reagiert.
+
+
+/* --------------------------------------------------------
+   VARIABLEN UND KONSTANTEN
+   -------------------------------------------------------- */
+
+/* EINSTELLUNGEN */
+
+#define TRAIN_POWER 3
+#define TIME_IN_STATION 1000
+
+
+/* VARIABLEN DEFINIEREN */
+
+int counter;
+
+
+/* --------------------------------------------------------
+   TASKS
+   -------------------------------------------------------- */
+
+/* Aktualisiert die Anzeige etc. */
+task Update () {
+
+     SetUserDisplay (counter, 0);
+     
+     Wait (100);
+
+}
+
+
+/* --------------------------------------------------------
+   FUNKTIONEN
+   -------------------------------------------------------- */
+
+/* STEUERUNG DES PROGRAMMABLAUFS */
+
+/* Initialisiert Variablen, Sensoren, etc. */
+void Init () {
+
+     // Variablen:
+     int counter = 0;
+     
+     // Sensoren:
+     SetSensorType (SENSOR_1, SENSOR_TYPE_TOUCH);
+     SetSensorMode (SENSOR_1, SENSOR_MODE_BOOL);
+     SetSensorType (SENSOR_2, SENSOR_TYPE_TOUCH);
+     SetSensorMode (SENSOR_2, SENSOR_MODE_BOOL);
+     
+     // Display:
+     SetUserDisplay (counter, 0);
+     
+}
+
+
+/* STEUERUNG DES ZUGES */
+
+void TrainSlowDown (int curr_power, int delay) {
+     int power = curr_power;
+     until (power == 0) {
+           power = power - 1;
+           SetPower (OUT_A, power);
+           Wait (delay);
+     }
+     Off (OUT_A);
+     SetPower (OUT_A, curr_power);
+}
+
+
+/* ZUSTÄNDE DES ZUGES */
+
+void InS1 () {
+
+     // in:
+     TrainSlowDown (TRAIN_POWER, 10);
+     
+     // event:
+     Wait (TIME_IN_STATION);
+     
+     // out:
+     /* --- */
+     
+}
+
+void S1ToS2 () {
+
+     // in:
+     SetPower (OUT_A, TRAIN_POWER);
+     OnFwd (OUT_A);
+     counter++;
+     
+     // event:
+     until (SENSOR_2 == true);
+     
+     // out:
+     /* --- */
+     
+}
+
+void InS2 () {
+
+     // in:
+     TrainSlowDown (TRAIN_POWER, 10);
+     
+     // event:
+     Wait (TIME_IN_STATION);
+     
+     // out:
+     /* --- */
+}
+
+void S2ToS1 () {
+
+     // in:
+     SetPower (OUT_A, TRAIN_POWER);
+     OnRev (OUT_A);
+     counter++;
+     
+     // event:
+     until (SENSOR_1 == true);
+     
+     // out:
+     /* --- */
+     
+}
+
+
+/* --------------------------------------------------------
+   TASKS
+   -------------------------------------------------------- */
+
+task main () {
+
+     Init ();
+     
+     start Update;
+     
+     while (true) {
+     
+           S2ToS1 ();
+           
+           InS1 ();
+           
+           S1ToS2 ();
+           
+           InS2 ();
+           
+     }
+
+}

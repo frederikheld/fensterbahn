@@ -1,0 +1,440 @@
+/* --------------------------------------------------------
+   VERSIONSINFOS
+   --------------------------------------------------------
+   
+   Version: 2.6
+   Autor:   Frederik Held
+   Datum:   16.04.2011
+   
+   Änderungen zu V 2.5:
+   - Trigger-Sensor wird während der Fahrt wieder abgeschalten, um das Problem aus V 2.4 zu beheben. Es gibt
+     daher vorerst keine Überwachung der Drück-Zeit.
+   
+   Änderungen zu V 2.4:
+   - Kontrollleuchte zeigt den Status der Anlage an
+   - Trigger-Sensor ist immer aktiviert, damit gemessen werden kann, wie lange schon gedrückt wird.
+     Seine optische Feedback-Funktion übernimmt jetzt die Kontrollleuchte.
+   
+   Änderungen zu V 2.3:
+   - Es ist jetzt auch möglich, per Message (Message 1) vom Computer aus den Zug zu starten
+   
+   Hardware:
+   - Einfahrt in die Stationen wird per Reed-Kontakt gemeldet. Diese werden wie Touch-Sensoren programmiert.
+     Nachteil: Im Gegensatz zu den Lichtsensoren kann nicht erkannt werden, ob sich ein Zug zur Zeit in der
+               Station befindet, sondern es wird nur die Vorbeifahrt detektiert.
+     Vorteil: Funktioniert absolut zuverlässig unabhängig vom Umgebungslicht.
+   - Trigger-Sensor in Form eines Reflexionslichttasters (BOS 6K-PU-1YC-S75-C von BALLUFF) nachgerüstet. Dieser gibt
+     als "aus" ~704 und als "ein" 1023 zurück.
+   - Beleuchtung des kompletten Zuges. Diese Leuchtet je nachdem, wie sie gepolt ist, unterschiedlich hell und ziehen
+     dementsprechend unterschiedlich viel Leistung. Um das zu kompensieren, sind unterschiedliche Geschwindigkeiten
+     für Links- und Rechtsfahrt nötig.
+     
+   Software:
+   - Timer (0) zählt die Triggertime
+   - Timer (1) zählt die Ridetime
+   
+   Bekannte Probleme:
+   - der TriggerWatcher funktioniert nicht, da der Sensor mit Unterspannung (9V statt 12V) betrieben wird und deshalb
+     etwas flackert, während der Zug fährt. Er produziert dabei laufend Events.
+     Lässt sich evtl. durch einen Puffer-Speicher beheben.
+     
+   -------------------------------------------------------- */
+
+
+/* --------------------------------------------------------
+   VARIABLEN UND KONSTANTEN
+   -------------------------------------------------------- */
+
+/* EINSTELLUNGEN */
+
+#define OUTPUT_TRAIN OUT_A                                  // Port, über den der Zug mit Spannung versorgt wird
+#define OUTPUT_TRIGGER OUT_C                                // Port, über den der Trigger-Sensor mit Spannung versorgt wird
+#define OUTPUT_INDICATOR OUT_B                              // Port, über den die Statusleuchte mit Spannung versorgt wird
+
+#define INPUT_STATION_1 SENSOR_1                            // Port, auf dem der Reed-Kontakt in Station 1 sein Signal liefert
+#define INPUT_STATION_2 SENSOR_2                            // Port, auf dem der Reed-Kontakt in Station 2 sein Signal liefert
+#define INPUT_TRIGGER SENSOR_3                              // Port, auf dem der Trigger-Sensor sein Signal liefert
+
+#define VALUE_TRIGGER 800                                   // Wert, bei dem der Trigger-Sensor schalten soll
+
+#define INDICATOR_DIRECTION_RED OUT_REV
+#define INDICATOR_DIRECTION_GREEN OUT_FWD
+
+/* wird eine dieser Zeiten überschritten, wird die Anlage angehalten */
+#define MAX_RIDE_TIME 150                                   // maximale Fahrzeit in 1/10 Sekunden
+#define MAX_TRIGGER_TIME 300                                // maximale Zeit, die der Trigger-Sensor aktiviert sein darf in 1/10 Sekunden
+
+// Personenzug:
+//#define POWER_TRAIN_S1_TO_S2 5                              // "Geschwindigkeit" des Zuges von Station 1 zu Station 2
+//#define POWER_TRAIN_S2_TO_S1 4                              // "Geschwindigkeit" des Zuges von Station 2 zu Station 1
+//#define DELAY_SLOW_DOWN 10                                  // Zeitverzögerung beim Abbremsen des Zuges
+
+// Güterzug:
+#define POWER_TRAIN_S1_TO_S2 5                              // "Geschwindigkeit" des Zuges von Station 1 zu Station 2
+#define POWER_TRAIN_S2_TO_S1 5                              // "Geschwindigkeit" des Zuges von Station 2 zu Station 1
+#define DELAY_SLOW_DOWN 10                                  // Zeitverzögerung beim Abbremsen des Zuges
+
+
+/* VARIABLEN DEFINIEREN */
+
+int counter_rides;
+int trigger_error;
+int indicator_mode;
+int state;
+
+
+/* --------------------------------------------------------
+   TASKS
+   -------------------------------------------------------- */
+
+/* Aktualisiert die Anzeige etc. */
+task Update () {
+
+     SetUserDisplay (counter_rides, 0);
+     
+     Wait (100);
+
+}
+
+/* setzt bei zu langer Betätigung des Triggers eine Fehler-Variable */
+task TriggerWatcher () {
+
+     while (true) {
+
+       // wenn der Trigger aktiviert wurde...
+       until (INPUT_TRIGGER > VALUE_TRIGGER);
+
+       // ... Timer starten
+       ClearTimer (0);
+
+       // wenn der Trigger zu lange aktiviert bleibt, oder wenn er losgelassen wird...
+       until (Timer (0) > MAX_TRIGGER_TIME || INPUT_TRIGGER < VALUE_TRIGGER);
+       if (Timer (0) > MAX_TRIGGER_TIME) {
+          trigger_error = 1;
+       } else {
+          trigger_error = 0;
+       }
+       
+    }
+
+}
+
+/* steuert die Kontrolllampe */
+task Indicator () {
+     
+     int indicator_delay_slow = 30;
+     int indicator_delay_fast = 10;
+     int indicator_direction_red = OUT_REV;
+     int indicator_direction_green = OUT_FWD;
+     int indicator_power = 7;
+
+     while (true) {
+
+       switch (indicator_mode) {
+
+              case 0:    // beide Lichter aus
+                   Off (OUTPUT_INDICATOR);
+              break;
+              case 1:    // günes Licht leuchtet
+                   SetPower (OUTPUT_INDICATOR, indicator_power);
+                   SetDirection (OUTPUT_INDICATOR, OUT_REV);
+                   On (OUTPUT_INDICATOR);
+              break;
+              case 2:    // grünes Licht blinkt langsam
+                   SetPower (OUTPUT_INDICATOR, indicator_power);
+                   SetDirection (OUTPUT_INDICATOR, OUT_REV);
+                   OnFor (OUTPUT_INDICATOR, indicator_delay_slow);
+                   Wait (indicator_delay_slow);
+              break;
+              case 3:    // grünes Licht blinkt schnell
+                   SetPower (OUTPUT_INDICATOR, indicator_power);
+                   SetDirection (OUTPUT_INDICATOR, OUT_REV);
+                   OnFor (OUTPUT_INDICATOR, indicator_delay_fast);
+                   Wait (indicator_delay_fast);
+              break;
+              case 4:    // rotes Licht leuchtet
+                   SetPower (OUTPUT_INDICATOR, indicator_power);
+                   SetDirection (OUTPUT_INDICATOR, OUT_FWD);
+                   On (OUTPUT_INDICATOR);
+              break;
+              case 5:    // rotes Licht blinkt langsam
+                   SetPower (OUTPUT_INDICATOR, indicator_power);
+                   SetDirection (OUTPUT_INDICATOR, OUT_FWD);
+                   OnFor (OUTPUT_INDICATOR, indicator_delay_slow);
+                   Wait (indicator_delay_slow);
+              break;
+              case 6:    // rotes Licht blinkt schnell
+                   SetPower (OUTPUT_INDICATOR, indicator_power);
+                   SetDirection (OUTPUT_INDICATOR, OUT_FWD);
+                   OnFor (OUTPUT_INDICATOR, indicator_delay_fast);
+                   Wait (indicator_delay_fast);
+              break;
+              default:   // beide Lichter aus
+                   Off (OUTPUT_INDICATOR);
+              break;
+
+       }
+
+     }
+
+}
+
+
+/* --------------------------------------------------------
+   FUNKTIONEN
+   -------------------------------------------------------- */
+
+/* STEUERUNG DES PROGRAMMABLAUFS */
+
+/* Initialisiert Variablen, Sensoren, etc. */
+void Init () {
+
+     // Variablen:
+     counter_rides = 0;
+     trigger_error = 0;
+     state = 2;                   // S2ToS1
+     SetIndicatorMode (0);
+     
+     // Sensoren:
+     SetSensorType (INPUT_STATION_1, SENSOR_TYPE_TOUCH);
+     SetSensorMode (INPUT_STATION_1, SENSOR_MODE_BOOL);
+     SetSensorType (INPUT_STATION_2, SENSOR_TYPE_TOUCH);
+     SetSensorMode (INPUT_STATION_2, SENSOR_MODE_BOOL);
+     ActivateTrigger ();
+     
+     // Display:
+     SetUserDisplay (counter_rides, 0);
+     
+}
+
+
+/* STEUERUNG DES TRIGGER-SENSORS */
+
+void ActivateTrigger () {
+    SetPower (OUTPUT_TRIGGER, OUT_FULL);
+    On (OUTPUT_TRIGGER); // Der Sensor muss hier schon mit Strom versorgt werden, sonst funktioniert die Einstellung von Type und Mode nicht!
+    SetSensorType (INPUT_TRIGGER, SENSOR_TYPE_NONE);
+    SetSensorMode (INPUT_TRIGGER, SENSOR_MODE_RAW);
+}
+
+void DeactivateTrigger () {
+    Off (OUTPUT_TRIGGER);
+}
+
+
+/* STEUERUNG DER KONTROLLLAMPE */
+
+void SetIndicatorMode (int mode) {
+
+    indicator_mode = mode;
+
+}
+
+
+/* STEUERUNG DES ZUGES */
+
+/* verzögertes Anhalten */
+void TrainSlowDown (int curr_power, int delay) {
+     int power = curr_power;
+     until (power == 0) {
+           power = power - 1;
+           SetPower (OUTPUT_TRAIN, power);
+           Wait (delay);
+     }
+     Off (OUTPUT_TRAIN);
+     SetPower (OUTPUT_TRAIN, curr_power);
+}
+
+
+/* ZUSTÄNDE DES ZUGES */
+
+void InS1 () {
+
+     // in:
+     TrainSlowDown (POWER_TRAIN_S2_TO_S1, DELAY_SLOW_DOWN);
+     ActivateTrigger ();
+     SetIndicatorMode (1);
+     
+     // event:
+     ClearMessage ();
+     until (INPUT_TRIGGER > VALUE_TRIGGER || Message () == 1 || trigger_error == 1);
+     
+     // next state:
+     if (INPUT_TRIGGER > VALUE_TRIGGER || Message () == 1) {
+        state = 1;      // S1ToS2
+     }
+     if (trigger_error == 1) {
+        state = 5;     // TriggerErrorInS1
+     }
+     
+     // out:
+     /* --- */
+     
+}
+
+void S1ToS2 () {
+
+     // in:
+     DeactivateTrigger ();
+     SetIndicatorMode(2);
+     SetPower (OUTPUT_TRAIN, POWER_TRAIN_S1_TO_S2);
+     OnFwd (OUTPUT_TRAIN);
+     ClearTimer (1);
+     counter_rides++;
+     
+     // event:
+     until (INPUT_STATION_2 == true || Timer (1) > MAX_RIDE_TIME);
+
+     // next state:
+     if (INPUT_STATION_2 == true) {
+        state = 4;       // InS2
+     }
+     if (Timer (1) > MAX_RIDE_TIME) {
+        state = 7;      // RideTimeError
+     }
+     
+     // out:
+     /* --- */
+     
+}
+
+void InS2 () {
+
+     // in:
+     TrainSlowDown (POWER_TRAIN_S1_TO_S2, DELAY_SLOW_DOWN);
+     ActivateTrigger ();
+     SetIndicatorMode (1);
+     
+     // event:
+     ClearMessage ();
+     until (INPUT_TRIGGER > VALUE_TRIGGER || Message () == 1 || trigger_error == 1);
+
+     // next state:
+     if (INPUT_TRIGGER > VALUE_TRIGGER || Message () == 1) {
+        state = 2;     // S2ToS1
+     }
+     if (trigger_error == 1) {
+        state = 6;     // TriggerErrorInS2
+     }
+     
+     // out:
+     /* --- */
+}
+
+void S2ToS1 () {
+
+     // in:
+     DeactivateTrigger ();
+     SetIndicatorMode (2);
+     SetPower (OUTPUT_TRAIN, POWER_TRAIN_S2_TO_S1);
+     OnRev (OUTPUT_TRAIN);
+     ClearTimer (1);
+     counter_rides++;
+     
+     // event:
+     until (INPUT_STATION_1 == true || Timer (1) > MAX_RIDE_TIME);
+     
+     // next state:
+     if (INPUT_STATION_1 == true) {
+        state = 3;       // InS1
+     }
+     if (Timer (1) > MAX_RIDE_TIME) {
+        state = 7;      // RideTimeError
+     }
+     
+     // out:
+     /* --- */
+     
+}
+
+void TriggerErrorInS1 () {
+
+     // in:
+     SetIndicatorMode (6);
+     
+     // event:
+     until (trigger_error == 0);
+     
+     // next state:
+     state = 3;    // InS1
+     
+     // out:
+     /* --- */
+}
+
+void TriggerErrorInS2 () {
+
+     // in:
+     SetIndicatorMode (6);
+
+     // event:
+     until (trigger_error == 0);
+     
+     // next state:
+     state = 4;    // InS2
+
+     // out:
+     /* --- */
+
+}
+
+void RidetimeError () {
+
+     // in:
+     Off (OUT_A + OUT_B + OUT_C);
+     SetIndicatorMode (4);
+     
+     // event:
+     until (false);
+     
+     // there is no real event and no out option cause this is a final state
+     // the system has to be rebooted manually!
+     
+}
+
+
+
+/* --------------------------------------------------------
+   MAIN
+   -------------------------------------------------------- */
+
+task main () {
+
+     Init ();
+     
+     start Update;
+     // start TriggerWatcher;
+     start Indicator;
+     
+     while (true) {
+     
+           switch (state) {
+                  case 1:
+                       S1ToS2 ();
+                  break;
+                  case 2:
+                       S2ToS1 ();
+                  break;
+                  case 3:
+                       InS1 ();
+                  break;
+                  case 4:
+                       InS2 ();
+                  break;
+                  case 5:
+                       TriggerErrorInS1 ();
+                  break;
+                  case 6:
+                       TriggerErrorInS2 ();
+                  break;
+                  case 7:
+                       RidetimeError ();
+                  break;
+                  default:           // das kann eigentlich nur eintreffen, wenn der Speicher im RCX futsch ist
+                       RidetimeError ();
+                  break;
+           }
+           
+     }
+
+}
